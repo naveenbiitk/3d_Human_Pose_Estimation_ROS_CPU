@@ -26,8 +26,8 @@ import message_filters as mf
 class pose3d_estim:
     def __init__(self):
         self.rgb_image_sub = mf.Subscriber("/camera/color/image_raw", Image)
-        self.depth_image_sub = mf.Subscriber("/camera/depth/image_raw",Image)
-        self.camera_info_sub = mf.Subscriber("/camera/depth/camera_info",CameraInfo)
+        self.depth_image_sub = mf.Subscriber("/camera/aligned_depth_to_color/image_raw",Image)
+        self.camera_info_sub = mf.Subscriber("camera/aligned_depth_to_color/camera_info",CameraInfo)
         self.mpPose=mp.solutions.pose
         self.pose=self.mpPose.Pose()
         self.mpDraw=mp.solutions.drawing_utils
@@ -37,6 +37,9 @@ class pose3d_estim:
         self.bridge = CvBridge()
         self.spheres,self.linelist=Marker(),Marker()
         self.marker_array= MarkerArray()
+        self.img = None
+        self.depth_arr = []
+        self.camera_data_K = []
        
      
  
@@ -61,6 +64,24 @@ class pose3d_estim:
                 pts.append((imgx,imgy)) 
         return pts,image
 
+
+    def depth_average(self, depth_arr, x, y, w=5, h=5):
+        """ Average depth value in a region of interest """
+        '''
+        depth_arr - depth image as numpy array
+        x - x coordinate of region of interest
+        y - y coordinate of region of interest
+        w - width of region of interest
+        h - height of region of interest
+        '''
+        depth_roi = depth_arr[y:y+h, x:x+w]
+        depth_roi = depth_roi[depth_roi > 0]
+        if len(depth_roi) == 0:
+            return 0
+        else:
+            return np.mean(depth_roi)
+
+
     def create_line_list(self,depth_arr,rpts):
         """ Creates linelist marker in kinect_frame. """
 
@@ -70,11 +91,10 @@ class pose3d_estim:
 
         try:
             body=[['shoulder_line',[rpts[11],rpts[12]]],['waist_line',[rpts[23],rpts[24]]],['left_shoulder_waist',[rpts[11],rpts[23]]],
-            ['right_shoulder_waist',[rpts[12],rpts[24]]],['right_thigh',[rpts[24],rpts[26]]],['left_thigh',[rpts[23],rpts[25]]],
-            ['right_leg',[rpts[26],rpts[28]]],['left_leg',[rpts[25],rpts[27]]],['right_forearm',[rpts[14],rpts[16]]],
-            ['left_forearm',[rpts[13],rpts[15]]],['right_bicep',[rpts[12],rpts[14]]],['left_bicep',[rpts[11],rpts[13]]]]
+            ['right_shoulder_waist',[rpts[12],rpts[24]]],
+            ['right_bicep',[rpts[12],rpts[14]]],['left_bicep',[rpts[11],rpts[13]]]]
             self.linelist.points=[]
-            self.linelist.header.frame_id = "kinect_frame"
+            self.linelist.header.frame_id = "camera_color_optical_frame"
             self.linelist.header.stamp = rospy.Time.now()
             self.linelist.type = Marker.LINE_LIST
             self.linelist.pose.orientation.w = 1.0
@@ -89,13 +109,15 @@ class pose3d_estim:
 
             for _,pointl in body:
                 for pt in pointl:
-                    depth_val=float(depth_arr[pt[1], pt[0]])
+                    #depth_val=float(depth_arr[pt[1], pt[0]])
+                    depth_val = self.depth_average(depth_arr,  pt[0],  pt[1], w=5, h=5)
+
                     ptl_x,ptl_y,ptl_z=self.depth_to_xyz(pt[0],pt[1],depth_val)
                    
                     self.linelist_point=Point()
-                    self.linelist_point.x = ptl_x
-                    self.linelist_point.y = ptl_y
-                    self.linelist_point.z = ptl_z
+                    self.linelist_point.x = ptl_x/1000.0
+                    self.linelist_point.y = ptl_y/1000.0
+                    self.linelist_point.z = ptl_z/1000.0
                     self.linelist.points.append(self.linelist_point)
                 
         except:
@@ -110,9 +132,9 @@ class pose3d_estim:
 
         try:
             #points=[nose,left_wrist,right,wrist,left_ankle,right ankle]
-            points=[rpts[0],rpts[15],rpts[16],rpts[27],rpts[28]]
+            points=[rpts[11],rpts[12],rpts[23],rpts[24]]
             self.spheres.points=[]
-            self.spheres.header.frame_id = "kinect_frame"
+            self.spheres.header.frame_id = "camera_color_optical_frame"
             self.spheres.header.stamp= rospy.Time.now()
                                 
             self.spheres.id = 0
@@ -132,9 +154,9 @@ class pose3d_estim:
                 pts_x,pts_y,pts_z=self.depth_to_xyz(p[0],p[1],depth_val)
                 
                 self.sphere_point=Point()
-                self.sphere_point.x = pts_x
-                self.sphere_point.y = pts_y
-                self.sphere_point.z = pts_z
+                self.sphere_point.x = pts_x/1000.0
+                self.sphere_point.y = pts_y/1000.0
+                self.sphere_point.z = pts_z/1000.0
                 self.spheres.points.append(self.sphere_point)
                     
         except:
@@ -160,39 +182,51 @@ class pose3d_estim:
         result = [x, y, z]
         return result
 
+
     def image_callback(self,rgb_data,depth_data,camera_data):
         try:
-            img = self.bridge.imgmsg_to_cv2(rgb_data,"bgr8")
-            d_img= self.bridge.imgmsg_to_cv2(depth_data,"passthrough")
-            print(d_img.shape,img.shape)
-            rpts,rimg=self.pose_2d_pts(img)
-            depth_arr=np.array(d_img)
+            self.img = self.bridge.imgmsg_to_cv2(rgb_data,"bgr8")
+            d_img= self.bridge.imgmsg_to_cv2(depth_data,"16UC1")
+            #print(d_img.shape,img.shape)
+            self.camera_data_K = camera_data.K
+            self.depth_arr=np.array(d_img)
             
-            self.cam_intrin=list(camera_data.K)
-            self.create_line_list(depth_arr,rpts)
-            self.create_spheres(depth_arr,rpts)
-            self.marker_array.markers.extend([self.spheres,self.linelist])
-            self.marker_pub.publish(self.marker_array)
+            # body=[['shoulder_line',[rpts[11],rpts[12]]],['waist_line',[rpts[23],rpts[24]]],['left_shoulder_waist',[rpts[11],rpts[23]]],
+            # ['right_shoulder_waist',[rpts[12],rpts[24]]],['right_thigh',[rpts[24],rpts[26]]],['left_thigh',[rpts[23],rpts[25]]],
+            # ['right_leg',[rpts[26],rpts[28]]],['left_leg',[rpts[25],rpts[27]]],['right_forearm',[rpts[14],rpts[16]]],
+            # ['left_forearm',[rpts[13],rpts[15]]],['right_bicep',[rpts[12],rpts[14]]],['left_bicep',[rpts[11],rpts[13]]]]
+            # print('body',body)
 
-            
         except CvBridgeError as e:
             print(e)
            
-        cv2.imshow('image',rimg)
-        cv2.waitKey(1)
-
-   
-  
+        # cv2.imshow('image',rimg)
+        # cv2.waitKey(1)
+        # rospy.sleep(1)
 
 
-def main(args):
-  rospy.init_node('pose_estim', anonymous=True)
-  p3d= pose3d_estim()
-  try:
-    rospy.spin()
-  except KeyboardInterrupt:
-    print("Shutting down")
-  cv2.destroyAllWindows()
+
+    def main(self):
+        if self.img is not None:
+            rpts,rimg=self.pose_2d_pts(self.img)
+            self.cam_intrin=list(self.camera_data_K)
+            self.create_line_list(self.depth_arr,rpts)
+            self.create_spheres(self.depth_arr,rpts)
+            self.marker_array.markers.extend([self.spheres,self.linelist])
+            self.marker_pub.publish(self.marker_array)
+
+
 
 if __name__ == '__main__':
-    main(sys.argv)
+    rospy.init_node('pose_estim', anonymous=True)
+    p3d = pose3d_estim()
+
+    rate = rospy.Rate(1)
+    look_around = False
+    
+    while not rospy.is_shutdown():
+        p3d.main()
+        rate.sleep()
+    
+    print("Shutting down")
+    cv2.destroyAllWindows()
